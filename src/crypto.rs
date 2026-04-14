@@ -1,0 +1,253 @@
+use base64::prelude::*;
+use age::{Decryptor, Encryptor, x25519};
+use chacha20::cipher::{KeyIvInit, StreamCipher};
+use chacha20::{ChaCha20, Key, Nonce};
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Write};
+use std::path::Path;
+use std::str::FromStr;
+
+use crate::error::{Result, Error};
+
+pub fn read_identity_from_file(path: &str) -> Result<x25519::Identity> {
+    let content = std::fs::read_to_string(path)?;
+    let str = content
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .next()
+        .ok_or_else(|| Error::Generic("No identity found in file"))?;
+    let identity = x25519::Identity::from_str(str).map_err(Error::Generic)?;
+    Ok(identity)
+}
+
+pub fn read_recipients_from_file(path: &str) -> Result<Vec<x25519::Recipient>> {
+    let content = std::fs::read_to_string(path)?;
+    let recipients = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let r = x25519::Recipient::from_str(line).map_err(Error::Generic)?;
+            Ok(r)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if recipients.is_empty() {
+        return Err(Error::Generic("No recipients found in file"))?;
+    }
+    Ok(recipients)
+}
+
+/// Obfuscate a filename using XChaCha20 stream cipher
+///
+/// # Arguments
+/// * `obfuscation_key` - 32-byte key for the cipher
+/// * `filename` - The filename to obfuscate (without parent path)
+///
+/// # Returns
+/// Obfuscated filename
+/// ```
+pub fn obfuscate_filename(obfuscation_key: &[u8; 32], filename: &str) -> String {
+    // Convert name to bytes
+    let name_bytes = filename.as_bytes();
+
+    // Create cipher
+    let key = Key::from_slice(obfuscation_key);
+    let nonce = Nonce::from_slice(&[0u8; 12]); // Use zero nonce for simplicity
+    let mut cipher = ChaCha20::new(key, nonce);
+
+    // Encrypt the name
+    let mut encrypted = name_bytes.to_vec();
+    cipher.apply_keystream(&mut encrypted);
+    let obfuscated_name = BASE64_URL_SAFE.encode(&encrypted);
+    obfuscated_name
+}
+
+/// Generate a new X25519 key pair for encryption
+pub fn generate_keypair() -> Result<(x25519::Identity, x25519::Recipient)> {
+    let identity = x25519::Identity::generate();
+    let recipient = identity.to_public();
+    Ok((identity, recipient))
+}
+
+/// Encrypt a file using age encryption
+///
+/// # Arguments
+/// * `input_path` - Path to the input file to encrypt
+/// * `output_path` - Path where the encrypted file will be saved
+/// * `recipient` - Public key for encryption
+///
+/// # Returns
+/// Result indicating success or failure
+pub fn encrypt_file(
+    input_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+    recipients: &Vec<x25519::Recipient>,
+) -> Result<()> {
+    // Open input and output files
+    let mut reader = BufReader::new(File::open(input_path)?);
+    let mut writer = BufWriter::new(File::create(output_path)?);
+    
+    // Create encryptor
+    let encryptor = Encryptor::with_recipients(recipients.iter().map(|r| Box::new(r.clone()) as Box<_>).collect())
+        .ok_or(Error::Generic("Failed to create encryptor"))?;
+
+    // Encrypt the data
+    let mut encrypt_writer = encryptor.wrap_output(&mut writer)?;
+    std::io::copy(&mut reader, &mut encrypt_writer)?;
+    encrypt_writer.finish()?.flush()?;
+    Ok(())
+}
+
+/// Decrypt a file using age encryption
+///
+/// # Arguments
+/// * `input_path` - Path to the encrypted file
+/// * `output_path` - Path where the decrypted file will be saved
+/// * `identity` - Private key for decryption
+///
+/// # Returns
+/// Result indicating success or failure
+pub fn decrypt_file<P: AsRef<Path>>(
+    input_path: P,
+    output_path: P,
+    identity: &x25519::Identity,
+) -> Result<()> {
+    // Open input and output files
+    let reader = BufReader::new(File::open(input_path)?);
+    let mut writer = BufWriter::new(File::create(output_path)?);
+
+    // Create decryptor
+    let decryptor = match Decryptor::new(reader)? {
+        Decryptor::Recipients(d) => d,
+        _ => return Err(age::DecryptError::InvalidHeader)?,
+    };
+
+    // Decrypt the data
+    let mut decrypt_reader = decryptor.decrypt(std::iter::once(identity as &dyn age::Identity))?;
+    std::io::copy(&mut decrypt_reader, &mut writer)?;
+    writer.flush()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_keypair_generation() {
+        let (identity, recipient) = generate_keypair().unwrap();
+
+        // Verify we can get the public key from identity
+        let derived_recipient = identity.to_public();
+        assert_eq!(recipient.to_string(), derived_recipient.to_string());
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_file() {
+        // Generate a test key pair
+        let (identity, recipient) = generate_keypair().unwrap();
+
+        // Create test input file
+        let mut input_file = NamedTempFile::new().unwrap();
+        let test_content = b"Hello, this is a test file for encryption!";
+        input_file.write_all(test_content).unwrap();
+        input_file.flush().unwrap();
+
+        // Create temporary output files
+        let encrypted_file = NamedTempFile::new().unwrap();
+        let decrypted_file = NamedTempFile::new().unwrap();
+
+        // Test encryption
+        encrypt_file(input_file.path(), encrypted_file.path(), &vec![recipient])
+            .expect("Failed to encrypt file");
+
+        // Verify encrypted file exists and is not empty
+        assert!(encrypted_file.path().exists());
+        let encrypted_size = encrypted_file.path().metadata().unwrap().len();
+        assert!(encrypted_size > 0);
+
+        // Test decryption
+        decrypt_file(encrypted_file.path(), decrypted_file.path(), &identity)
+            .expect("Failed to decrypt file");
+
+        // Verify decrypted content matches original
+        let mut decrypted_content = Vec::new();
+        File::open(decrypted_file.path())
+            .unwrap()
+            .read_to_end(&mut decrypted_content)
+            .unwrap();
+
+        assert_eq!(test_content, decrypted_content.as_slice());
+    }
+
+    #[test]
+    fn test_nonexistent_input_file() {
+        use std::path::Path;
+        let output_file = NamedTempFile::new().unwrap();
+        let (_, recipient) = generate_keypair().unwrap();
+
+        let result = encrypt_file(
+            Path::new("/nonexistent/path/to/file.txt"),
+            output_file.path().to_path_buf(),
+            &vec![recipient],
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_file() {
+        let (identity, recipient) = generate_keypair().unwrap();
+
+        // Create empty test input file
+        let input_file = NamedTempFile::new().unwrap();
+
+        // Create temporary output files
+        let encrypted_file = NamedTempFile::new().unwrap();
+        let decrypted_file = NamedTempFile::new().unwrap();
+
+        // Test encryption of empty file
+        encrypt_file(input_file.path(), encrypted_file.path(), &vec![recipient])
+            .expect("Failed to encrypt empty file");
+
+        // Test decryption of empty file
+        decrypt_file(encrypted_file.path(), decrypted_file.path(), &identity)
+            .expect("Failed to decrypt empty file");
+
+        // Verify decrypted file is also empty
+        let decrypted_size = decrypted_file.path().metadata().unwrap().len();
+        assert_eq!(decrypted_size, 0);
+    }
+
+    #[test]
+    fn test_obfuscate_filename() {
+        let key = [0u8; 32];
+
+        // Test basic filename with extension
+        let obfuscated1 = obfuscate_filename(&key, "document.txt");
+        assert!(obfuscated1.len() > "document.txt".len() && obfuscated1.len() < 2 * "document.txt".len());
+
+        // Test filename with multiple dots
+        let obfuscated2 = obfuscate_filename(&key, "my.document.txt");
+        assert!(obfuscated2.len() > "my.document.txt".len() && obfuscated2.len() < 2 * "my.document.txt".len());
+        assert!(obfuscated1.len() < obfuscated2.len());
+    }
+
+    #[test]
+    fn test_obfuscate_filename_consistency() {
+        let key = [0u8; 32];
+
+        // Same input should produce same output
+        let obfuscated1 = obfuscate_filename(&key, "test.txt");
+        let obfuscated2 = obfuscate_filename(&key, "test.txt");
+        assert_eq!(obfuscated1, obfuscated2);
+
+        // Different keys should produce different outputs
+        let key2 = [1u8; 32];
+        let obfuscated3 = obfuscate_filename(&key2, "test.txt");
+        assert_ne!(obfuscated1, obfuscated3);
+    }
+}
