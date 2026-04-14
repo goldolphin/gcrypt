@@ -1,0 +1,21 @@
+[package]
+name = "gcrypt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+age = { version = "0.10", features = ["armor"] }
+rand = "0.8"
+chacha20 = "0.9"
+sha2 = "0.10"
+clap = { version = "4.0", features = ["derive"] }
+base64 = "0.22.1"
+chrono = "0.4.44"
+filetime = "0.2.27"
+shellexpand = "3.1.2"
+data-encoding = "2.11.0"
+
+[dev-dependencies]
+tempfile = "3"
