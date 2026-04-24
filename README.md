@@ -1,32 +1,22 @@
 # gcrypt
 A simple, portable folder-oriented encryption tool
 
-## Rage Key Management
+## Key Management
 
-### Creating Rage Keys
+### Creating Keys
 
-To create a new rage key pair, you can use the `rage-keygen` tool, which is part of the rage encryption tool. Here's how to install rage on macOS:
-
-```bash
-# Using Homebrew
-brew install rage
-
-# Using cargo (Rust package manager)
-cargo install rage
-```
-
-Once rage is installed, you can generate a new key pair:
+Once gcrypt is installed, you can generate a new key pair:
 
 ```bash
-# Generate a new rage key pair
-rage-keygen -o key.txt
+# Generate a new key pair
+gcrypt keygen -o key.txt
 ```
 
-This will create a file `key.txt` containing your private key. The public key will be displayed in the terminal.
+This will create a file `key.txt` containing your private key with the public key in the comments.
 
-### Getting the Key ID
+### Getting the identity and recipient files
 
-The key ID is the public key of your rage key pair. When you generate a key pair with `rage-keygen`, the public key is displayed in the terminal. It looks something like this:
+When you generate a key pair with `gcrypt keygen`, it looks something like this:
 
 ```
 # created: 2026-04-13T12:34:56+00:00
@@ -34,34 +24,30 @@ The key ID is the public key of your rage key pair. When you generate a key pair
 AGE-SECRET-KEY-1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF
 ```
 
-The public key is `age1yt3wfvsfqx0x8g2yqz5p8m09n6f3x7d4c2v1b`. This is the key ID you should use with gcrypt.
+The public key is `age1yt3wfvsfqx0x8g2yqz5p8m09n6f3x7d4c2v1b`. You can add public keys of yours and others in a `recipients.txt` line by line. The file containing your private key (like `key.txt` created by `gcrypt keygen`) is your identity file, which is used for decryption.
 
 ### Importing and Exporting Keys
 
 #### Exporting Keys
 
-To export your rage key, simply copy the contents of the `key.txt` file you created with `rage-keygen`.
+To export your key, simply copy the contents of the `key.txt` file you created with `gcrypt keygen`.
 
 #### Importing Keys
 
-To import a rage key, create a file containing the secret key and use it with gcrypt.
+To import a key, create a file containing the secret key and use it with gcrypt.
 
 ## Usage with gcrypt
 
 ### Encrypting a Directory
 
 ```bash
-# Encrypt a directory using a rage key ID
-gcrypt encrypt --input /path/to/input --output /path/to/output --id age1yt3wfvsfqx0x8g2yqz5p8m09n6f3x7d4c2v1b
+# Encrypt a directory using a recipients.txt
+gcrypt encrypt -i /path/to/input -o /path/to/output --recipients /path/to/recipients.txt
 ```
 
 ### Decrypting a Directory
 
 ```bash
-# Decrypt a directory using the same rage key ID
-gcrypt decrypt --input /path/to/encrypted --output /path/to/decrypted --id age1yt3wfvsfqx0x8g2yqz5p8m09n6f3x7d4c2v1b
+# Decrypt a directory using a key.txt
+gcrypt decrypt -i /path/to/encrypted -o /path/to/decrypted --identity /path/to/key.txt
 ```
-
-## Note
-
-Currently, gcrypt expects the key ID to be the full rage secret key. This is a temporary implementation and will be improved in future versions to support proper key management with key IDs.

@@ -32,9 +32,9 @@ enum Command {
         #[clap(short, long, required = true)]
         output: String,
 
-        /// Path to the file containing the recipient key for encryption
+        /// Path to the file containing the recipient keys for encryption
         #[clap(long, required = true)]
-        recipient: String,
+        recipients: String,
     },
     /// Decrypt a directory
     Decrypt {
@@ -83,14 +83,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Encrypt {
             input,
             output,
-            recipient,
+            recipients,
         } => {
             println!("Encrypting directory: {}", input);
             println!("Output directory: {}", output);
-            println!("Using recipient key file: {}", recipient);
+            println!("Using recipient keys file: {}", recipients);
 
-            // Read the recipient key from file
-            let recipients = crypto::read_recipients_from_file(&recipient)?;
+            // Read the recipient keys from file
+            let recipients = crypto::read_recipients_from_file(&recipients)?;
 
             cryptor::encrypt_directory(input, output, &recipients)?;
         }
