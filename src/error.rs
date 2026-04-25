@@ -15,6 +15,10 @@ define_error! (
         TomlSer(toml::ser::Error),
         #[from]
         Hex(hex::FromHexError),
+        #[from]
+        SystemTime(std::time::SystemTimeError),
+        #[from]
+        FromUtf8(std::string::FromUtf8Error),
         Generic(&'static str)
     }
 );

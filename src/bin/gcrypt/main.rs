@@ -1,7 +1,7 @@
 use age::secrecy::ExposeSecret;
 use clap::Parser;
 use gcrypt::cryptor;
-use gcrypt::crypto;
+use gcrypt::config;
 use std::fs;
 
 #[derive(Parser, Debug)]
@@ -20,35 +20,35 @@ enum Command {
     Keygen {
         /// Path to the output file where the generated key pair will be saved
         #[clap(short, long, required = true)]
-        output: String,
+        output: std::path::PathBuf,
     },
     /// Encrypt a directory
     Encrypt {
         /// Path to the input directory to encrypt
         #[clap(short, long, required = true)]
-        input: String,
+        input: std::path::PathBuf,
 
         /// Path to the output directory where encrypted files will be stored
         #[clap(short, long, required = true)]
-        output: String,
+        output: std::path::PathBuf,
 
-        /// Path to the file containing the recipient keys for encryption
-        #[clap(long, required = true)]
-        recipients: String,
+        /// Path to the config file
+        #[clap(short, long, required = true)]
+        config: std::path::PathBuf,
     },
     /// Decrypt a directory
     Decrypt {
         /// Path to the encrypted input directory
         #[clap(short, long, required = true)]
-        input: String,
+        input: std::path::PathBuf,
 
         /// Path to the output directory where decrypted files will be stored
         #[clap(short, long, required = true)]
-        output: String,
+        output: std::path::PathBuf,
 
-        /// Path to the file containing the identity key for decryption
-        #[clap(long, required = true)]
-        identity: String,
+        /// Path to the config file
+        #[clap(short, long, required = true)]
+        config: std::path::PathBuf,
     },
 }
 
@@ -57,56 +57,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match args.command {
         Command::Keygen { output } => {
-            let path = std::path::Path::new(&output);
-            match path.parent() {
+            let default_config = match output.parent() {
                 Some(parent) => {
                     if !parent.as_os_str().is_empty() && !parent.is_dir() {
                         println!("Creating directories for key file...");
                         fs::create_dir_all(parent)?;
                     }
+                    Ok(parent.join("gcrypt.config"))
                 }
                 None => {
-                    println!("Please specify a valid file path...");
+                    Err("Please specify a valid file path...")
+
                 }
-            }
-            if path.exists() {
+            }?;
+
+            if output.exists() {
                 Err("Key file already exists. Please specify a different filename.")?;
             }
+
             println!("Generating X25519 key pair...");
             let (identity, recipient) = gcrypt::crypto::generate_keypair()?;
             let key_pair_str = format!("# created: {}\n# public key: {}\n{}", chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true), recipient.to_string(), identity.to_string().expose_secret());
-            fs::write(path, key_pair_str)?;
+            fs::write(&output, key_pair_str)?;
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o400))?;
-            println!("Key pair generated and saved to {}.", path.to_string_lossy());
+            fs::set_permissions(&output, fs::Permissions::from_mode(0o400))?;
+            println!("Key pair generated and saved to {}.", output.to_string_lossy());
+
+            if !default_config.exists() {
+                let config = config::Config {
+                    identity_path: output,
+                    recipients: vec![],
+                };
+                config.to_file(&default_config)?;
+                println!("Default config file created at {}.", default_config.to_string_lossy());
+            }
         }
+
         Command::Encrypt {
             input,
             output,
-            recipients,
+            config,
         } => {
-            println!("Encrypting directory: {}", input);
-            println!("Output directory: {}", output);
-            println!("Using recipient keys file: {}", recipients);
+            println!("Encrypting directory: {}", input.to_string_lossy());
+            println!("Output directory: {}", output.to_string_lossy());
+            println!("Using config file: {}", config.to_string_lossy());
 
-            // Read the recipient keys from file
-            let recipients = crypto::read_recipients_from_file(&recipients)?;
-
-            cryptor::encrypt_directory(input, output, &recipients)?;
+            let config = config::Config::from_file(config)?;
+            let key_set = cryptor::KeySet::from_config(&config)?;
+            let mut reporter = cryptor::Reporter::new();
+            cryptor::encrypt_directory(input, output, &key_set, &mut reporter)?;
+            reporter.report();
         }
+
         Command::Decrypt {
             input,
             output,
-            identity,
+            config,
         } => {
-            println!("Decrypting directory: {}", input);
-            println!("Output directory: {}", output);
-            println!("Using identity key file: {}", identity);
+            println!("Decrypting directory: {}", input.to_string_lossy());
+            println!("Output directory: {}", output.to_string_lossy());
+            println!("Using config file: {}", config.to_string_lossy());
 
-            // Read the identity key from file
-            let identity = crypto::read_identity_from_file(&identity)?;
-
-            cryptor::decrypt_directory(input, output, &identity)?;
+            let config = config::Config::from_file(config)?;
+            let key_set = cryptor::KeySet::from_config(&config)?;
+            let mut reporter = cryptor::Reporter::new();
+            cryptor::decrypt_directory(input, output, &key_set, &mut reporter)?;
+            reporter.report();
         }
     }
     Ok(())

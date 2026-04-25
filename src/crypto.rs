@@ -2,14 +2,13 @@ use base64::prelude::*;
 use age::{Decryptor, Encryptor, x25519};
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::{ChaCha20, Key, Nonce};
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::str::FromStr;
 
 use crate::error::{Result, Error};
 
-pub fn read_identity_from_file(path: &str) -> Result<x25519::Identity> {
+pub fn read_identity_from_file(path: impl AsRef<Path>) -> Result<x25519::Identity> {
     let content = std::fs::read_to_string(path)?;
     let str = content
         .lines()
@@ -19,23 +18,6 @@ pub fn read_identity_from_file(path: &str) -> Result<x25519::Identity> {
         .ok_or_else(|| Error::Generic("No identity found in file"))?;
     let identity = x25519::Identity::from_str(str).map_err(Error::Generic)?;
     Ok(identity)
-}
-
-pub fn read_recipients_from_file(path: &str) -> Result<Vec<x25519::Recipient>> {
-    let content = std::fs::read_to_string(path)?;
-    let recipients = content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| {
-            let r = x25519::Recipient::from_str(line).map_err(Error::Generic)?;
-            Ok(r)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    if recipients.is_empty() {
-        return Err(Error::Generic("No recipients found in file"))?;
-    }
-    Ok(recipients)
 }
 
 /// Obfuscate a filename using XChaCha20 stream cipher
@@ -59,7 +41,7 @@ pub fn obfuscate_filename(obfuscation_key: &[u8; 32], filename: &str) -> String 
     // Encrypt the name
     let mut encrypted = name_bytes.to_vec();
     cipher.apply_keystream(&mut encrypted);
-    let obfuscated_name = BASE64_URL_SAFE.encode(&encrypted);
+    let obfuscated_name = BASE64_URL_SAFE_NO_PAD.encode(&encrypted);
     obfuscated_name
 }
 
@@ -73,28 +55,24 @@ pub fn generate_keypair() -> Result<(x25519::Identity, x25519::Recipient)> {
 /// Encrypt a file using age encryption
 ///
 /// # Arguments
-/// * `input_path` - Path to the input file to encrypt
-/// * `output_path` - Path where the encrypted file will be saved
-/// * `recipient` - Public key for encryption
+/// * `reader` - Reader for the input file to encrypt
+/// * `writer` - Writer where the encrypted file will be saved
+/// * `recipients` - List of public keys for encryption
 ///
 /// # Returns
 /// Result indicating success or failure
 pub fn encrypt_file(
-    input_path: impl AsRef<Path>,
-    output_path: impl AsRef<Path>,
-    recipients: &Vec<x25519::Recipient>,
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    recipients: &[x25519::Recipient],
 ) -> Result<()> {
-    // Open input and output files
-    let mut reader = BufReader::new(File::open(input_path)?);
-    let mut writer = BufWriter::new(File::create(output_path)?);
-    
     // Create encryptor
     let encryptor = Encryptor::with_recipients(recipients.iter().map(|r| Box::new(r.clone()) as Box<_>).collect())
         .ok_or(Error::Generic("Failed to create encryptor"))?;
 
     // Encrypt the data
-    let mut encrypt_writer = encryptor.wrap_output(&mut writer)?;
-    std::io::copy(&mut reader, &mut encrypt_writer)?;
+    let mut encrypt_writer = encryptor.wrap_output(writer)?;
+    std::io::copy(reader, &mut encrypt_writer)?;
     encrypt_writer.finish()?.flush()?;
     Ok(())
 }
@@ -103,20 +81,16 @@ pub fn encrypt_file(
 ///
 /// # Arguments
 /// * `input_path` - Path to the encrypted file
-/// * `output_path` - Path where the decrypted file will be saved
+/// * `writer` - Writer where the decrypted file will be saved
 /// * `identity` - Private key for decryption
 ///
 /// # Returns
 /// Result indicating success or failure
-pub fn decrypt_file<P: AsRef<Path>>(
-    input_path: P,
-    output_path: P,
+pub fn decrypt_file(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
     identity: &x25519::Identity,
 ) -> Result<()> {
-    // Open input and output files
-    let reader = BufReader::new(File::open(input_path)?);
-    let mut writer = BufWriter::new(File::create(output_path)?);
-
     // Create decryptor
     let decryptor = match Decryptor::new(reader)? {
         Decryptor::Recipients(d) => d,
@@ -125,7 +99,7 @@ pub fn decrypt_file<P: AsRef<Path>>(
 
     // Decrypt the data
     let mut decrypt_reader = decryptor.decrypt(std::iter::once(identity as &dyn age::Identity))?;
-    std::io::copy(&mut decrypt_reader, &mut writer)?;
+    std::io::copy(&mut decrypt_reader, writer)?;
     writer.flush()?;
     Ok(())
 }
@@ -135,6 +109,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use tempfile::NamedTempFile;
+    use std::fs::File;
 
     #[test]
     fn test_keypair_generation() {
@@ -161,7 +136,7 @@ mod tests {
         let decrypted_file = NamedTempFile::new().unwrap();
 
         // Test encryption
-        encrypt_file(input_file.path(), encrypted_file.path(), &vec![recipient])
+        encrypt_file(&mut File::open(input_file.path()).unwrap(), &mut File::create(encrypted_file.path()).unwrap(), &vec![recipient])
             .expect("Failed to encrypt file");
 
         // Verify encrypted file exists and is not empty
@@ -170,7 +145,7 @@ mod tests {
         assert!(encrypted_size > 0);
 
         // Test decryption
-        decrypt_file(encrypted_file.path(), decrypted_file.path(), &identity)
+        decrypt_file(&mut File::open(encrypted_file.path()).unwrap(), &mut File::create(decrypted_file.path()).unwrap(), &identity)
             .expect("Failed to decrypt file");
 
         // Verify decrypted content matches original
@@ -181,21 +156,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(test_content, decrypted_content.as_slice());
-    }
-
-    #[test]
-    fn test_nonexistent_input_file() {
-        use std::path::Path;
-        let output_file = NamedTempFile::new().unwrap();
-        let (_, recipient) = generate_keypair().unwrap();
-
-        let result = encrypt_file(
-            Path::new("/nonexistent/path/to/file.txt"),
-            output_file.path().to_path_buf(),
-            &vec![recipient],
-        );
-
-        assert!(result.is_err());
     }
 
     #[test]
@@ -210,11 +170,11 @@ mod tests {
         let decrypted_file = NamedTempFile::new().unwrap();
 
         // Test encryption of empty file
-        encrypt_file(input_file.path(), encrypted_file.path(), &vec![recipient])
+        encrypt_file(&mut File::open(input_file.path()).unwrap(), &mut File::create(encrypted_file.path()).unwrap(), &vec![recipient])
             .expect("Failed to encrypt empty file");
 
         // Test decryption of empty file
-        decrypt_file(encrypted_file.path(), decrypted_file.path(), &identity)
+        decrypt_file(&mut File::open(encrypted_file.path()).unwrap(), &mut File::create(decrypted_file.path()).unwrap(), &identity)
             .expect("Failed to decrypt empty file");
 
         // Verify decrypted file is also empty
