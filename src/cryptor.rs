@@ -20,7 +20,9 @@ pub struct KeySet {
 
 impl KeySet {
     pub fn from_config(config: &Config) -> Result<Self> {
-        let identity = read_identity_from_file(&config.identity_path)?;
+        let identity_path = config.identity_path.to_string_lossy();
+        let identity_path = shellexpand::tilde(identity_path.as_ref());
+        let identity = read_identity_from_file(identity_path.as_ref())?;
         let mut recipients = config.recipients.iter()
             .map(|line| {
                 let r = x25519::Recipient::from_str(line).map_err(Error::Generic)?;
@@ -137,7 +139,7 @@ fn clean_dir(dir_path: impl AsRef<Path>, white_list: &BTreeSet<&str>, reporter: 
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
 
-        if file_name_str == DIR_INFO_FILENAME || white_list.contains(file_name_str.as_ref()) {
+        if white_list.contains(file_name_str.as_ref()) {
             continue;
         }
 
