@@ -43,12 +43,12 @@ To import a key, create a file containing the secret key and use it with gcrypt.
 
 ```bash
 # Encrypt a directory
-gcrypt encrypt -i /path/to/input -o /path/to/output -c /path/to/gcrypt.config
+gcrypt encrypt -s /path/to/source -e /path/to/encrypted -c /path/to/gcrypt.config
 ```
 
 ### Decrypting a Directory
 
 ```bash
 # Decrypt a directory
-gcrypt decrypt -i /path/to/encrypted -o /path/to/decrypted -c /path/to/gcrypt.config
+gcrypt decrypt -s /path/to/source -e /path/to/encrypted -c /path/to/gcrypt.config
 ```

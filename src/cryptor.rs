@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufReader};
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 use std::str::FromStr;
 
 const DIR_INFO_FILENAME: &str = ".gcrypt";
@@ -40,45 +40,62 @@ impl KeySet {
 }
 
 pub struct Reporter {
-    unchanged_by_metadata: Vec<PathBuf>,
-    unchanged_by_checksum: Vec<PathBuf>,
-    added: Vec<PathBuf>,
-    modified: Vec<PathBuf>,
-    deleted: Vec<PathBuf>,
-    updated_dir_infos: Vec<PathBuf>,
+    unchanged_by_metadata: u32,
+    unchanged_by_checksum: u32,
+    added: u32,
+    modified: u32,
+    deleted: u32,
+    updated_dir_infos: u32,
 }
 
 impl Reporter {
     pub fn new() -> Self {
         Self {
-            unchanged_by_metadata: Vec::new(),
-            unchanged_by_checksum: Vec::new(),
-            added: Vec::new(),
-            modified: Vec::new(),
-            deleted: Vec::new(),
-            updated_dir_infos: Vec::new(),
+            unchanged_by_metadata: 0,
+            unchanged_by_checksum: 0,
+            added: 0,
+            modified: 0,
+            deleted: 0,
+            updated_dir_infos: 0,
         }
     }
 
-    pub fn report(&self) {
-        println!("Input:");
-        println!("  Total files: {}", self.unchanged_by_metadata.len() + self.unchanged_by_checksum.len() + self.added.len() + self.modified.len());
-        println!("  Unchanged files(by metadata): {}", self.unchanged_by_metadata.len());
-        println!("  Unchanged files(by checksum): {}", self.unchanged_by_checksum.len());
-        println!("  Added files: {}", self.added.len());
-        for path in &self.added {
-            println!("    | {}", path.to_string_lossy());
-        }
-        println!("  Modified files: {}", self.modified.len());
-        for path in &self.modified {
-            println!("    | {}", path.to_string_lossy());
-        }
+    pub fn unchanged_by_metadata(&mut self, _: impl AsRef<Path>) {
+        self.unchanged_by_metadata += 1;
+    }
 
-        println!("  Updated DirInfos: {}", self.updated_dir_infos.len());
-        println!("Deleted items in output: {}", self.deleted.len());
-        for path in &self.deleted {
-            println!("    | {}", path.to_string_lossy());
-        }
+    pub fn unchanged_by_checksum(&mut self, _: impl AsRef<Path>) {
+        self.unchanged_by_checksum += 1;
+    }
+
+    pub fn added(&mut self, path: impl AsRef<Path>) {
+        self.added += 1;
+        println!("ADD: {}", path.as_ref().to_string_lossy());
+    }
+
+    pub fn modified(&mut self, path: impl AsRef<Path>) {
+        self.modified += 1;
+        println!("MODIFY: {}", path.as_ref().to_string_lossy());
+    }
+
+    pub fn updated_dir_info(&mut self, _: impl AsRef<Path>) {
+        self.updated_dir_infos += 1;
+    }
+
+    pub fn deleted(&mut self, path: impl AsRef<Path>) {
+        self.deleted += 1;
+        println!("DELETE: {}", path.as_ref().to_string_lossy());
+    }
+
+    pub fn report(&self) {
+        println!("--- Summary ---\nInput:");
+        println!("  Total files: {}", self.unchanged_by_metadata + self.unchanged_by_checksum + self.added + self.modified);
+        println!("  Unchanged files(by metadata): {}", self.unchanged_by_metadata);
+        println!("  Unchanged files(by checksum): {}", self.unchanged_by_checksum);
+        println!("  Added files: {}", self.added);
+        println!("  Modified files: {}", self.modified);
+        println!("Updated DirInfos: {}", self.updated_dir_infos);
+        println!("Deleted items in output: {}", self.deleted);
     }
 }
 
@@ -148,43 +165,50 @@ fn clean_dir(dir_path: impl AsRef<Path>, white_list: &BTreeSet<&str>, reporter: 
         } else {
             fs::remove_file(&path)?;
         }
-        reporter.deleted.push(path);
+        reporter.deleted(path);
     }
 
     Ok(())
 }
 
+pub fn load_dir_info(
+    encrypted_dir: impl AsRef<Path>,
+    key_set: &KeySet,
+) -> Result<DirInfo> {
+    DirInfo::from_file(encrypted_dir.as_ref().join(DIR_INFO_FILENAME), &key_set.identity)
+}
+
 /// Encrypt a directory
 ///
 /// # Arguments
-/// * `input_dir` - Path to the input directory to encrypt
-/// * `output_dir` - Path to the output directory where encrypted files will be stored
+/// * `source_dir` - Path to the source directory
+/// * `encrypted_dir` - Path to the encrypted directory
 /// * `key_set` - Set of keys for encryption
 ///
 /// # Returns
 /// Result indicating success or failure
 pub fn encrypt_directory(
-    input_dir: impl AsRef<Path>,
-    output_dir: impl AsRef<Path>,
+    source_dir: impl AsRef<Path>,
+    encrypted_dir: impl AsRef<Path>,
     key_set: &KeySet,
     reporter: &mut Reporter,
 ) -> Result<()> {
-    let input = input_dir.as_ref();
-    let output = output_dir.as_ref();
+    let source = source_dir.as_ref();
+    let encrypted = encrypted_dir.as_ref();
 
-    // create the output directory if it doesn't exist
-    fs::create_dir_all(output)?;
+    // create the encrypted directory if it doesn't exist
+    fs::create_dir_all(encrypted)?;
 
     // Load the DirInfo
-    let dir_info_path = output.join(DIR_INFO_FILENAME);
+    let dir_info_path = encrypted.join(DIR_INFO_FILENAME);
     let dir_info = load_or_create_dir_info(&dir_info_path, &key_set.identity)?;
     let obfuscation_key = dir_info.parse_obfuscation_key()?;
 
     // Process directory entries
     let mut updated_items: BTreeMap<String, Item> = BTreeMap::new();
-    for entry in fs::read_dir(input)? {
+    for entry in fs::read_dir(source)? {
         let entry = entry?;
-        let input_file = entry.path();
+        let source_file = entry.path();
         let file_name = entry.file_name();
         let file_name_str = file_name.to_string_lossy();
 
@@ -194,38 +218,38 @@ pub fn encrypt_directory(
 
         let file_type = entry.file_type()?;
         if file_type.is_file() {
-            let mtime = get_file_mtime(&input_file)?;
+            let mtime = get_file_mtime(&source_file)?;
             let size = entry.metadata()?.len();
             let obfuscated_name = obfuscate_filename(&obfuscation_key, &file_name_str);
             let (checksum, to_encrypt) = match dir_info.items.get(file_name_str.as_ref()) {
                 Some(Item::File (recorded)) if *recorded.obfuscated_name == obfuscated_name => {
                     if recorded.mtime == mtime && recorded.size == size {
                         // File is unchanged based on metadata
-                        reporter.unchanged_by_metadata.push(input_file.clone());
+                        reporter.unchanged_by_metadata(source_file.clone());
                         (recorded.checksum.clone(), false)
                     } else {
-                        let checksum = calculate_file_checksum(&input_file)?;
+                        let checksum = calculate_file_checksum(&source_file)?;
                         if *recorded.checksum == checksum {
                             // File is unchanged based on checksum
-                            reporter.unchanged_by_checksum.push(input_file.clone());
+                            reporter.unchanged_by_checksum(source_file.clone());
                             (checksum, false)
                         } else {
                             // File is modified
-                            reporter.modified.push(input_file.clone());
+                            reporter.modified(source_file.clone());
                             (checksum, true)
                         }
                     }
                 }
                 _ => {
                     // New file or obfuscated_name is changed
-                    let checksum = calculate_file_checksum(&input_file)?;
-                    reporter.added.push(input_file.clone());
+                    let checksum = calculate_file_checksum(&source_file)?;
+                    reporter.added(source_file.clone());
                     (checksum, true)
                 }
             };
             if to_encrypt {
-                let output_file = output.join(&obfuscated_name);
-                encrypt_file(&mut File::open(&input_file)?, &mut File::create(&output_file)?, &key_set.recipients)?;
+                let encrypted_file = encrypted.join(&obfuscated_name);
+                encrypt_file(&mut File::open(&source_file)?, &mut File::create(&encrypted_file)?, &key_set.recipients)?;
             }
             updated_items.insert(
                 file_name_str.to_string(),
@@ -240,10 +264,10 @@ pub fn encrypt_directory(
             );
         } else if file_type.is_dir() {
             let obfuscated_name = obfuscate_filename(&obfuscation_key, &file_name_str);
-            let input_subdir = input.join(file_name_str.as_ref());
-            let output_subdir = output.join(&obfuscated_name);
+            let source_subdir = source.join(file_name_str.as_ref());
+            let encrypted_subdir = encrypted.join(&obfuscated_name);
             // Encrypt the directory recursively
-            encrypt_directory(input_subdir, output_subdir, key_set, reporter)?;
+            encrypt_directory(source_subdir, encrypted_subdir, key_set, reporter)?;
             updated_items.insert(
                 file_name_str.to_string(),
                 Item::Dir {
@@ -257,19 +281,19 @@ pub fn encrypt_directory(
     let mut updated_dir_info = dir_info.clone();
     updated_dir_info.items = updated_items;
     if updated_dir_info != dir_info || !dir_info_path.is_file() {
-        reporter.updated_dir_infos.push(input.to_path_buf());
+        reporter.updated_dir_info(source.to_path_buf());
 
         // Save the updated DirInfo
         updated_dir_info.to_file(&dir_info_path, &key_set.recipients)?;
     }
 
-    // Delete items in output directory but not in input directory
+    // Delete items in encrypted directory but not in source directory
     let mut white_list = updated_dir_info.items.values().map(|item| match item {
         Item::File (info) => info.obfuscated_name.as_str(),
         Item::Dir { obfuscated_name } => obfuscated_name,
     }).collect::<BTreeSet<_>>();
     white_list.insert(DIR_INFO_FILENAME);
-    clean_dir(output, &white_list, reporter)?;
+    clean_dir(encrypted, &white_list, reporter)?;
 
     Ok(())
 }
@@ -277,74 +301,74 @@ pub fn encrypt_directory(
 /// Decrypt a directory
 ///
 /// # Arguments
-/// * `input_dir` - Path to the encrypted input directory
-/// * `output_dir` - Path to the output directory where decrypted files will be stored
+/// * `source_dir` - Path to the source directory
+/// * `encrypted_dir` - Path to the encrypted directory
 /// * `key_set` - Set of keys for decryption
 ///
 /// # Returns
 /// Result indicating success or failure
 pub fn decrypt_directory(
-    input_dir: impl AsRef<Path>,
-    output_dir: impl AsRef<Path>,
+    source_dir: impl AsRef<Path>,
+    encrypted_dir: impl AsRef<Path>,
     key_set: &KeySet,
     reporter: &mut Reporter,
 ) -> Result<()> {
-    let input = input_dir.as_ref();
-    let output = output_dir.as_ref();
+    let source = source_dir.as_ref();
+    let encrypted = encrypted_dir.as_ref();
 
-    // create the output directory if it doesn't exist
-    fs::create_dir_all(output)?;
+    // create the source directory if it doesn't exist
+    fs::create_dir_all(source)?;
 
     // Load the DirInfo
-    let dir_info_path = input.join(DIR_INFO_FILENAME);
+    let dir_info_path = encrypted.join(DIR_INFO_FILENAME);
     let dir_info = load_or_create_dir_info(&dir_info_path, &key_set.identity)?;
 
     // Process each item in the config
     for (name, item) in &dir_info.items {
         match item {
             Item::File (recorded) => {
-                let input_file = input.join(&recorded.obfuscated_name);
-                let output_file = output.join(name);
-                let (mtime, to_decrypt) = if output_file.is_file() {
-                    let mtime = get_file_mtime(&output_file)?;
-                    let size = output_file.metadata()?.len();
+                let encrypted_file = encrypted.join(&recorded.obfuscated_name);
+                let source_file = source.join(name);
+                let (mtime, to_decrypt) = if source_file.is_file() {
+                    let mtime = get_file_mtime(&source_file)?;
+                    let size = source_file.metadata()?.len();
                     if mtime == recorded.mtime && size == recorded.size {
-                        reporter.unchanged_by_metadata.push(output_file.clone());
+                        reporter.unchanged_by_metadata(source_file.clone());
                         (mtime, false)
                     } else {
-                        let checksum = calculate_file_checksum(&output_file)?;
+                        let checksum = calculate_file_checksum(&source_file)?;
                         if checksum == *recorded.checksum {
-                            reporter.unchanged_by_checksum.push(output_file.clone());
+                            reporter.unchanged_by_checksum(source_file.clone());
                             (mtime, false)
                         } else {
-                            reporter.modified.push(output_file.clone());
+                            reporter.modified(source_file.clone());
                             (mtime, true)
                         }
                     }
                 } else {
-                    reporter.added.push(output_file.clone());
+                    reporter.added(source_file.clone());
                     (0, true)
                 };
 
                 if to_decrypt {
-                    decrypt_file(&mut File::open(&input_file)?, &mut File::create(&output_file)?, &key_set.identity)?;
+                    decrypt_file(&mut File::open(&encrypted_file)?, &mut File::create(&source_file)?, &key_set.identity)?;
                 }
                 if mtime != recorded.mtime {
-                    set_file_mtime(&output_file, recorded.mtime)?;
+                    set_file_mtime(&source_file, recorded.mtime)?;
                 }
             }
             Item::Dir { obfuscated_name } => {
-                let input_subdir = input.join(obfuscated_name);
-                let output_subdir = output.join(name);
+                let encrypted_subdir = encrypted.join(obfuscated_name);
+                let source_subdir = source.join(name);
                 // Decrypt the subdirectory recursively
-                decrypt_directory(&input_subdir, &output_subdir, key_set, reporter)?;
+                decrypt_directory(&source_subdir, &encrypted_subdir, key_set, reporter)?;
             }
         }
     }
 
-    // Delete items in output directory but not in input directory
+    // Delete items in source directory but not in encrypted directory
     let white_list = dir_info.items.keys().map(String::as_str).collect::<BTreeSet<_>>();
-    clean_dir(output, &white_list, reporter)?;
+    clean_dir(source, &white_list, reporter)?;
 
     Ok(())
 }
@@ -381,15 +405,15 @@ mod tests {
 
     #[test]
     fn test_encrypt_directory() {
-        let input_dir = tempdir().unwrap();
-        let output_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let encrypted_dir = tempdir().unwrap();
 
         // Create test files and directories
-        let file_path = input_dir.path().join("test.txt");
+        let file_path = source_dir.path().join("test.txt");
         let mut file = fs::File::create(&file_path).unwrap();
         file.write_all(b"Test content").unwrap();
 
-        let subdir_path = input_dir.path().join("subdir");
+        let subdir_path = source_dir.path().join("subdir");
         fs::create_dir(&subdir_path).unwrap();
 
         let subfile_path = subdir_path.join("subfile.txt");
@@ -404,13 +428,13 @@ mod tests {
         };
 
         // Encrypt the directory
-        encrypt_directory(input_dir.path(), output_dir.path(), &key_set, &mut Reporter::new()).unwrap();
+        encrypt_directory(source_dir.path(), encrypted_dir.path(), &key_set, &mut Reporter::new()).unwrap();
 
-        // Verify DirInfo file was created in output directory
-        let dir_info_path = output_dir.path().join(DIR_INFO_FILENAME);
+        // Verify DirInfo file was created in encrypted directory
+        let dir_info_path = encrypted_dir.path().join(DIR_INFO_FILENAME);
         assert!(dir_info_path.exists());
 
-        // Verify encrypted files were created in output directory
+        // Verify encrypted files were created in encrypted directory
         let dir_info = load_or_create_dir_info(dir_info_path, &key_set.identity).unwrap();
 
         // Check that items exist in DirInfo
@@ -419,13 +443,13 @@ mod tests {
 
         // Verify encrypted file exists
         if let Item::File (info) = dir_info.items.get("test.txt").unwrap() {
-            let encrypted_file = output_dir.path().join(&info.obfuscated_name);
+            let encrypted_file = encrypted_dir.path().join(&info.obfuscated_name);
             assert!(encrypted_file.exists());
         }
 
         // Verify encrypted subdirectory exists
         if let Item::Dir { obfuscated_name } = dir_info.items.get("subdir").unwrap() {
-            let encrypted_subdir = output_dir.path().join(obfuscated_name);
+            let encrypted_subdir = encrypted_dir.path().join(obfuscated_name);
             assert!(encrypted_subdir.exists());
 
             // Verify subfile was encrypted
@@ -445,16 +469,16 @@ mod tests {
 
     #[test]
     fn test_decrypt_directory() {
-        let input_dir = tempdir().unwrap();
-        let output_dir = tempdir().unwrap();
+        let source_dir = tempdir().unwrap();
+        let encrypted_dir = tempdir().unwrap();
         let decrypted_dir = tempdir().unwrap();
 
         // Create test files and directories
-        let file_path = input_dir.path().join("test.txt");
+        let file_path = source_dir.path().join("test.txt");
         let mut file = fs::File::create(&file_path).unwrap();
         file.write_all(b"Test content").unwrap();
 
-        let subdir_path = input_dir.path().join("subdir");
+        let subdir_path = source_dir.path().join("subdir");
         fs::create_dir(&subdir_path).unwrap();
 
         let subfile_path = subdir_path.join("subfile.txt");
@@ -469,10 +493,10 @@ mod tests {
         };
 
         // Encrypt the directory
-        encrypt_directory(input_dir.path(), output_dir.path(), &key_set, &mut Reporter::new()).unwrap();
+        encrypt_directory(source_dir.path(), encrypted_dir.path(), &key_set, &mut Reporter::new()).unwrap();
 
         // Decrypt the directory
-        decrypt_directory(output_dir.path(), decrypted_dir.path(), &key_set, &mut Reporter::new()).unwrap();
+        decrypt_directory(decrypted_dir.path(), encrypted_dir.path(), &key_set, &mut Reporter::new()).unwrap();
 
         // Verify decrypted files exist and have correct content
         let decrypted_file = decrypted_dir.path().join("test.txt");

@@ -1,7 +1,7 @@
 use age::secrecy::ExposeSecret;
+use chrono::TimeZone;
 use clap::Parser;
-use gcrypt::cryptor;
-use gcrypt::config;
+use gcrypt::{config, cryptor, dir_info};
 use std::fs;
 
 #[derive(Parser, Debug)]
@@ -22,33 +22,42 @@ enum Command {
         #[clap(short, long, required = true)]
         output: std::path::PathBuf,
     },
-    /// Encrypt a directory
-    Encrypt {
-        /// Path to the input directory to encrypt
-        #[clap(short, long, required = true)]
-        input: std::path::PathBuf,
-
-        /// Path to the output directory where encrypted files will be stored
-        #[clap(short, long, required = true)]
-        output: std::path::PathBuf,
-
+    List {
         /// Path to the config file
         #[clap(short, long, required = true)]
         config: std::path::PathBuf,
+
+        /// Path to the encrypted directory
+        #[clap(short, long, required = true)]
+        encrypted: std::path::PathBuf,
+    },
+    /// Encrypt a directory
+    Encrypt {
+        /// Path to the config file
+        #[clap(short, long, required = true)]
+        config: std::path::PathBuf,
+
+        /// Path to the source directory
+        #[clap(short, long, required = true)]
+        source: std::path::PathBuf,
+
+        /// Path to the encrypted directory
+        #[clap(short, long, required = true)]
+        encrypted: std::path::PathBuf,
     },
     /// Decrypt a directory
     Decrypt {
-        /// Path to the encrypted input directory
-        #[clap(short, long, required = true)]
-        input: std::path::PathBuf,
-
-        /// Path to the output directory where decrypted files will be stored
-        #[clap(short, long, required = true)]
-        output: std::path::PathBuf,
-
         /// Path to the config file
         #[clap(short, long, required = true)]
         config: std::path::PathBuf,
+
+        /// Path to the source directory
+        #[clap(short, long, required = true)]
+        source: std::path::PathBuf,
+
+        /// Path to the encrypted directory
+        #[clap(short, long, required = true)]
+        encrypted: std::path::PathBuf,
     },
 }
 
@@ -93,35 +102,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Command::Encrypt {
-            input,
-            output,
-            config,
-        } => {
-            println!("Encrypting directory: {}", input.to_string_lossy());
-            println!("Output directory: {}", output.to_string_lossy());
+        Command::List { config, encrypted } => {
             println!("Using config file: {}", config.to_string_lossy());
+            println!("Encrypted directory: {}", encrypted.to_string_lossy());
+
+            let config = config::Config::from_file(config)?;
+            let key_set = cryptor::KeySet::from_config(&config)?;
+            let dir_info = cryptor::load_dir_info(encrypted, &key_set)?;
+            for (name, item) in &dir_info.items {
+                match item {
+                    dir_info::Item::File(file_info) => {
+                        let mtime = chrono::Local.timestamp_opt(file_info.mtime, 0).single().ok_or("Invalid mtime")?;
+                        println!("{} (obfuscated name: {} size: {}, mtime: {}, checksum: {})", name, file_info.obfuscated_name, file_info.size, mtime.to_rfc3339_opts(chrono::SecondsFormat::Secs, true), file_info.checksum);
+                    }
+                    dir_info::Item::Dir { obfuscated_name } => {
+                        println!("<{}> (obfuscated name: {})", name, obfuscated_name);
+                    }
+                }
+            }
+        }
+
+        Command::Encrypt {
+            config,
+            source,
+            encrypted,
+        } => {
+            println!("Using config file: {}", config.to_string_lossy());
+            println!("Source directory: {}", source.to_string_lossy());
+            println!("Encrypted directory: {}", encrypted.to_string_lossy());
 
             let config = config::Config::from_file(config)?;
             let key_set = cryptor::KeySet::from_config(&config)?;
             let mut reporter = cryptor::Reporter::new();
-            cryptor::encrypt_directory(input, output, &key_set, &mut reporter)?;
+            cryptor::encrypt_directory(source, encrypted, &key_set, &mut reporter)?;
             reporter.report();
         }
 
         Command::Decrypt {
-            input,
-            output,
             config,
+            source,
+            encrypted,
         } => {
-            println!("Decrypting directory: {}", input.to_string_lossy());
-            println!("Output directory: {}", output.to_string_lossy());
             println!("Using config file: {}", config.to_string_lossy());
+            println!("Source directory: {}", source.to_string_lossy());
+            println!("Encrypted directory: {}", encrypted.to_string_lossy());
 
             let config = config::Config::from_file(config)?;
             let key_set = cryptor::KeySet::from_config(&config)?;
             let mut reporter = cryptor::Reporter::new();
-            cryptor::decrypt_directory(input, output, &key_set, &mut reporter)?;
+            cryptor::decrypt_directory(source, encrypted, &key_set, &mut reporter)?;
             reporter.report();
         }
     }
