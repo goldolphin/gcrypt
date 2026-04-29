@@ -202,12 +202,8 @@ impl<'a> Context<'a> {
         }
     }
 
-    pub fn load_or_create_dir_info(&self, identity: &x25519::Identity) -> Result<DirInfo> {
-        let dir_info: DirInfo = match DirInfo::from_file(&self.dir_info_path, identity) {
-            Ok(c) => c,
-            Err(_) => DirInfo::new(),
-        };
-        Ok(dir_info)
+    pub fn load_dir_info(&self, key_set: &KeySet) -> Result<DirInfo> {
+        load_dir_info(self.encrypted_dir, key_set)
     }
 
     pub fn get_source_file(&self, file_key: &str) -> PathBuf {
@@ -245,7 +241,7 @@ pub fn encrypt_directory(
     fs::create_dir_all(context.encrypted_dir)?;
 
     // Load the DirInfo
-    let input_dir_info = context.load_or_create_dir_info(&key_set.identity)?;
+    let input_dir_info = context.load_dir_info(&key_set).unwrap_or_else(|_| DirInfo::new());
 
     // Process directory entries
     let mut output_dir_info = DirInfo::new();
@@ -384,7 +380,7 @@ pub fn decrypt_directory(
     fs::create_dir_all(context.source_dir)?;
 
     // Load the DirInfo
-    let input_dir_info = context.load_or_create_dir_info(&key_set.identity)?;
+    let input_dir_info = context.load_dir_info(&key_set)?;
 
     // Process each item in the config
     for (file_key, input_file_info) in &input_dir_info.items {
@@ -511,7 +507,7 @@ mod tests {
         assert!(context.dir_info_path.exists());
 
         // Verify encrypted files were created in encrypted directory
-        let dir_info = context.load_or_create_dir_info(&key_set.identity).unwrap();
+        let dir_info = context.load_dir_info(&key_set).unwrap();
 
         // Verify encrypted file exists
         let file_info = dir_info.items.get("test.txt").unwrap();
