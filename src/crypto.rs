@@ -1,12 +1,9 @@
-use base64::prelude::*;
 use age::{Decryptor, Encryptor, x25519};
-use chacha20::cipher::{KeyIvInit, StreamCipher};
-use chacha20::{ChaCha20, Key, Nonce};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::str::FromStr;
 
-use crate::error::{Result, Error};
+use crate::error::{Error, Result};
 
 pub fn read_identity_from_file(path: impl AsRef<Path>) -> Result<x25519::Identity> {
     let content = std::fs::read_to_string(path)?;
@@ -18,31 +15,6 @@ pub fn read_identity_from_file(path: impl AsRef<Path>) -> Result<x25519::Identit
         .ok_or_else(|| Error::Generic("No identity found in file"))?;
     let identity = x25519::Identity::from_str(str).map_err(Error::Generic)?;
     Ok(identity)
-}
-
-/// Obfuscate a filename using XChaCha20 stream cipher
-///
-/// # Arguments
-/// * `obfuscation_key` - 32-byte key for the cipher
-/// * `filename` - The filename to obfuscate (without parent path)
-///
-/// # Returns
-/// Obfuscated filename
-/// ```
-pub fn obfuscate_filename(obfuscation_key: &[u8; 32], filename: &str) -> String {
-    // Convert name to bytes
-    let name_bytes = filename.as_bytes();
-
-    // Create cipher
-    let key = Key::from_slice(obfuscation_key);
-    let nonce = Nonce::from_slice(&[0u8; 12]); // Use zero nonce for simplicity
-    let mut cipher = ChaCha20::new(key, nonce);
-
-    // Encrypt the name
-    let mut encrypted = name_bytes.to_vec();
-    cipher.apply_keystream(&mut encrypted);
-    let obfuscated_name = BASE64_URL_SAFE_NO_PAD.encode(&encrypted);
-    obfuscated_name
 }
 
 /// Generate a new X25519 key pair for encryption
@@ -67,8 +39,13 @@ pub fn encrypt_file(
     recipients: &[x25519::Recipient],
 ) -> Result<()> {
     // Create encryptor
-    let encryptor = Encryptor::with_recipients(recipients.iter().map(|r| Box::new(r.clone()) as Box<_>).collect())
-        .ok_or(Error::Generic("Failed to create encryptor"))?;
+    let encryptor = Encryptor::with_recipients(
+        recipients
+            .iter()
+            .map(|r| Box::new(r.clone()) as Box<_>)
+            .collect(),
+    )
+    .ok_or(Error::Generic("Failed to create encryptor"))?;
 
     // Encrypt the data
     let mut encrypt_writer = encryptor.wrap_output(writer)?;
@@ -107,9 +84,9 @@ pub fn decrypt_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::io::{Read, Write};
     use tempfile::NamedTempFile;
-    use std::fs::File;
 
     #[test]
     fn test_keypair_generation() {
@@ -136,8 +113,12 @@ mod tests {
         let decrypted_file = NamedTempFile::new().unwrap();
 
         // Test encryption
-        encrypt_file(&mut File::open(input_file.path()).unwrap(), &mut File::create(encrypted_file.path()).unwrap(), &vec![recipient])
-            .expect("Failed to encrypt file");
+        encrypt_file(
+            &mut File::open(input_file.path()).unwrap(),
+            &mut File::create(encrypted_file.path()).unwrap(),
+            &vec![recipient],
+        )
+        .expect("Failed to encrypt file");
 
         // Verify encrypted file exists and is not empty
         assert!(encrypted_file.path().exists());
@@ -145,8 +126,12 @@ mod tests {
         assert!(encrypted_size > 0);
 
         // Test decryption
-        decrypt_file(&mut File::open(encrypted_file.path()).unwrap(), &mut File::create(decrypted_file.path()).unwrap(), &identity)
-            .expect("Failed to decrypt file");
+        decrypt_file(
+            &mut File::open(encrypted_file.path()).unwrap(),
+            &mut File::create(decrypted_file.path()).unwrap(),
+            &identity,
+        )
+        .expect("Failed to decrypt file");
 
         // Verify decrypted content matches original
         let mut decrypted_content = Vec::new();
@@ -170,44 +155,23 @@ mod tests {
         let decrypted_file = NamedTempFile::new().unwrap();
 
         // Test encryption of empty file
-        encrypt_file(&mut File::open(input_file.path()).unwrap(), &mut File::create(encrypted_file.path()).unwrap(), &vec![recipient])
-            .expect("Failed to encrypt empty file");
+        encrypt_file(
+            &mut File::open(input_file.path()).unwrap(),
+            &mut File::create(encrypted_file.path()).unwrap(),
+            &vec![recipient],
+        )
+        .expect("Failed to encrypt empty file");
 
         // Test decryption of empty file
-        decrypt_file(&mut File::open(encrypted_file.path()).unwrap(), &mut File::create(decrypted_file.path()).unwrap(), &identity)
-            .expect("Failed to decrypt empty file");
+        decrypt_file(
+            &mut File::open(encrypted_file.path()).unwrap(),
+            &mut File::create(decrypted_file.path()).unwrap(),
+            &identity,
+        )
+        .expect("Failed to decrypt empty file");
 
         // Verify decrypted file is also empty
         let decrypted_size = decrypted_file.path().metadata().unwrap().len();
         assert_eq!(decrypted_size, 0);
-    }
-
-    #[test]
-    fn test_obfuscate_filename() {
-        let key = [0u8; 32];
-
-        // Test basic filename with extension
-        let obfuscated1 = obfuscate_filename(&key, "document.txt");
-        assert!(obfuscated1.len() > "document.txt".len() && obfuscated1.len() < 2 * "document.txt".len());
-
-        // Test filename with multiple dots
-        let obfuscated2 = obfuscate_filename(&key, "my.document.txt");
-        assert!(obfuscated2.len() > "my.document.txt".len() && obfuscated2.len() < 2 * "my.document.txt".len());
-        assert!(obfuscated1.len() < obfuscated2.len());
-    }
-
-    #[test]
-    fn test_obfuscate_filename_consistency() {
-        let key = [0u8; 32];
-
-        // Same input should produce same output
-        let obfuscated1 = obfuscate_filename(&key, "test.txt");
-        let obfuscated2 = obfuscate_filename(&key, "test.txt");
-        assert_eq!(obfuscated1, obfuscated2);
-
-        // Different keys should produce different outputs
-        let key2 = [1u8; 32];
-        let obfuscated3 = obfuscate_filename(&key2, "test.txt");
-        assert_ne!(obfuscated1, obfuscated3);
     }
 }

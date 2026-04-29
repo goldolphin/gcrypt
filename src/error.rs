@@ -14,11 +14,11 @@ define_error! (
         #[from]
         TomlSer(toml::ser::Error),
         #[from]
-        Hex(hex::FromHexError),
-        #[from]
         SystemTime(std::time::SystemTimeError),
         #[from]
         FromUtf8(std::string::FromUtf8Error),
+        #[from]
+        StripPrefix(std::path::StripPrefixError),
         Generic(&'static str)
     }
 );

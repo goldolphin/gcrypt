@@ -1,7 +1,7 @@
 use age::secrecy::ExposeSecret;
-use chrono::TimeZone;
+use chrono::{DateTime, Local, TimeZone};
 use clap::Parser;
-use gcrypt::{config, cryptor, dir_info};
+use gcrypt::{config, cryptor};
 use std::fs;
 
 #[derive(Parser, Debug)]
@@ -74,10 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Ok(parent.join("gcrypt.config"))
                 }
-                None => {
-                    Err("Please specify a valid file path...")
-
-                }
+                None => Err("Please specify a valid file path..."),
             }?;
 
             if output.exists() {
@@ -86,11 +83,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("Generating X25519 key pair...");
             let (identity, recipient) = gcrypt::crypto::generate_keypair()?;
-            let key_pair_str = format!("# created: {}\n# public key: {}\n{}", chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true), recipient.to_string(), identity.to_string().expose_secret());
+            let key_pair_str = format!(
+                "# created: {}\n# public key: {}\n{}",
+                format(chrono::Local::now()),
+                recipient.to_string(),
+                identity.to_string().expose_secret()
+            );
             fs::write(&output, key_pair_str)?;
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&output, fs::Permissions::from_mode(0o400))?;
-            println!("Key pair generated and saved to {}.", output.to_string_lossy());
+            println!(
+                "Key pair generated and saved to {}.",
+                output.to_string_lossy()
+            );
 
             if !default_config.exists() {
                 let config = config::Config {
@@ -98,7 +103,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     recipients: vec![],
                 };
                 config.to_file(&default_config)?;
-                println!("Default config file created at {}.", default_config.to_string_lossy());
+                println!(
+                    "Default config file created at {}.",
+                    default_config.to_string_lossy()
+                );
             }
         }
 
@@ -109,16 +117,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let config = config::Config::from_file(config)?;
             let key_set = cryptor::KeySet::from_config(&config)?;
             let dir_info = cryptor::load_dir_info(encrypted, &key_set)?;
-            for (name, item) in &dir_info.items {
-                match item {
-                    dir_info::Item::File(file_info) => {
-                        let mtime = chrono::Local.timestamp_opt(file_info.mtime, 0).single().ok_or("Invalid mtime")?;
-                        println!("{} (obfuscated name: {} size: {}, mtime: {}, checksum: {})", name, file_info.obfuscated_name, file_info.size, mtime.to_rfc3339_opts(chrono::SecondsFormat::Secs, true), file_info.checksum);
-                    }
-                    dir_info::Item::Dir { obfuscated_name } => {
-                        println!("<{}> (obfuscated name: {})", name, obfuscated_name);
-                    }
-                }
+            for (file_key, file_info) in &dir_info.items {
+                let mtime = from_mtime(file_info.mtime)?;
+                println!(
+                    "size: {}, mtime: {}, checksum: {} |{}",
+                    file_info.size,
+                    format(mtime),
+                    file_info.checksum,
+                    file_key
+                );
             }
         }
 
@@ -155,4 +162,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+fn from_mtime(mtime: i64) -> Result<DateTime<Local>, &'static str> {
+    chrono::Local
+        .timestamp_opt(mtime, 0)
+        .single()
+        .ok_or("Invalid mtime")
+}
+
+fn format(time: DateTime<Local>) -> String {
+    time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
