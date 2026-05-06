@@ -29,7 +29,7 @@ impl KeySet {
             .recipients
             .iter()
             .map(|line| {
-                let r = x25519::Recipient::from_str(line).map_err(Error::Generic)?;
+                let r = x25519::Recipient::from_str(line).map_err(Error::Static)?;
                 Ok(r)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -51,8 +51,8 @@ pub struct Reporter {
     unchanged_by_checksum: u32,
     added: u32,
     modified: u32,
+    only_in_output: u32,
     reuse: u32,
-    deleted: u32,
 }
 
 impl Reporter {
@@ -62,8 +62,8 @@ impl Reporter {
             unchanged_by_checksum: 0,
             added: 0,
             modified: 0,
+            only_in_output: 0,
             reuse: 0,
-            deleted: 0,
         }
     }
 
@@ -85,13 +85,13 @@ impl Reporter {
         println!("MODIFY: {}", path.as_ref().to_string_lossy());
     }
 
-    pub fn reuse(&mut self, _: impl AsRef<Path>) {
-        self.reuse += 1;
+    pub fn only_in_output(&mut self, path: impl AsRef<Path>) {
+        self.only_in_output += 1;
+        println!("ONLY IN OUTPUT: {}", path.as_ref().to_string_lossy());
     }
 
-    pub fn deleted(&mut self, path: impl AsRef<Path>) {
-        self.deleted += 1;
-        println!("DELETE: {}", path.as_ref().to_string_lossy());
+    pub fn reuse(&mut self, _: impl AsRef<Path>) {
+        self.reuse += 1;
     }
 
     pub fn report(&self) {
@@ -110,8 +110,18 @@ impl Reporter {
         );
         println!("  Added files: {}", self.added);
         println!("  Modified files: {}", self.modified);
+        println!("Files only in output: {}", self.only_in_output);
+        if self.only_in_output > 0 {
+            println!("  WARNING: These files will be deleted during encryption/decryption.");
+        }
         println!("File reuse: {}", self.reuse);
-        println!("Deleted files in output: {}", self.deleted);
+
+        println!();
+        if self.added == 0 && self.modified == 0 && self.only_in_output == 0 {
+            println!("No files changed.");
+        } else {
+            println!("Files changed.");
+        }
     }
 }
 
@@ -220,12 +230,123 @@ impl<'a> Context<'a> {
     }
 }
 
+struct NoopActions;
+
+impl Actions for NoopActions {
+    fn encrypt_file(
+        &self,
+        _source_file: impl AsRef<Path>,
+        _encrypted_file: impl AsRef<Path>,
+        _recipients: &[x25519::Recipient],
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn load_dir_info(&self, context: &Context, key_set: &KeySet) -> Result<DirInfo> {
+        context.load_dir_info(&key_set)
+    }
+
+    fn save_dir_info(
+        &self,
+        _dir_info: &DirInfo,
+        _path: impl AsRef<Path>,
+        _recipients: &[x25519::Recipient],
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn remove_dir(&self, _path: impl AsRef<Path>) -> Result<()> {
+        Ok(())
+    }
+
+    fn remove_file(&self, _path: impl AsRef<Path>) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Check status of a source directory against a encrypted directory
+///
+/// # Arguments
+/// * `source_dir` - Path to the source directory
+/// * `encrypted_dir` - Path to the encrypted directory
+/// * `key_set` - Set of keys for encryption
+/// * `reporter` - Reporter to update with encryption status
+///
+/// # Returns
+/// Result indicating success or failure
+pub fn check_status(
+    source_dir: impl AsRef<Path>,
+    encrypted_dir: impl AsRef<Path>,
+    key_set: &KeySet,
+    reporter: &mut Reporter,
+) -> Result<()> {
+    process_source_directory(
+        source_dir,
+        encrypted_dir,
+        key_set,
+        reporter,
+        &NoopActions {},
+    )
+}
+
+struct EncryptActions;
+
+impl Actions for EncryptActions {
+    fn encrypt_file(
+        &self,
+        source_file: impl AsRef<Path>,
+        encrypted_file: impl AsRef<Path>,
+        recipients: &[x25519::Recipient],
+    ) -> Result<()> {
+        let source_file = source_file.as_ref();
+        let encrypted_file = encrypted_file.as_ref();
+        if let Some(parent) = encrypted_file.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        encrypt_file(
+            &mut File::open(source_file)?,
+            &mut File::create(encrypted_file)?,
+            recipients,
+        )
+    }
+
+    fn load_dir_info(&self, context: &Context, key_set: &KeySet) -> Result<DirInfo> {
+        context
+            .load_dir_info(&key_set)
+            .or_else(|_| Ok(DirInfo::new()))
+    }
+
+    fn save_dir_info(
+        &self,
+        dir_info: &DirInfo,
+        path: impl AsRef<Path>,
+        recipients: &[x25519::Recipient],
+    ) -> Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        dir_info.to_file(path, recipients)
+    }
+
+    fn remove_dir(&self, path: impl AsRef<Path>) -> Result<()> {
+        fs::remove_dir(path.as_ref())?;
+        Ok(())
+    }
+
+    fn remove_file(&self, path: impl AsRef<Path>) -> Result<()> {
+        fs::remove_file(path.as_ref())?;
+        Ok(())
+    }
+}
+
 /// Encrypt a directory
 ///
 /// # Arguments
 /// * `source_dir` - Path to the source directory
 /// * `encrypted_dir` - Path to the encrypted directory
 /// * `key_set` - Set of keys for encryption
+/// * `reporter` - Reporter to update with encryption status
 ///
 /// # Returns
 /// Result indicating success or failure
@@ -235,13 +356,48 @@ pub fn encrypt_directory(
     key_set: &KeySet,
     reporter: &mut Reporter,
 ) -> Result<()> {
+    process_source_directory(
+        source_dir,
+        encrypted_dir,
+        key_set,
+        reporter,
+        &EncryptActions {},
+    )
+}
+
+trait Actions {
+    fn encrypt_file(
+        &self,
+        source_file: impl AsRef<Path>,
+        encrypted_file: impl AsRef<Path>,
+        recipients: &[x25519::Recipient],
+    ) -> Result<()>;
+
+    fn load_dir_info(&self, context: &Context, key_set: &KeySet) -> Result<DirInfo>;
+
+    fn save_dir_info(
+        &self,
+        dir_info: &DirInfo,
+        path: impl AsRef<Path>,
+        recipients: &[x25519::Recipient],
+    ) -> Result<()>;
+
+    fn remove_dir(&self, path: impl AsRef<Path>) -> Result<()>;
+
+    fn remove_file(&self, path: impl AsRef<Path>) -> Result<()>;
+}
+
+fn process_source_directory(
+    source_dir: impl AsRef<Path>,
+    encrypted_dir: impl AsRef<Path>,
+    key_set: &KeySet,
+    reporter: &mut Reporter,
+    actions: &impl Actions,
+) -> Result<()> {
     let context = Context::new(source_dir.as_ref(), encrypted_dir.as_ref());
 
-    // create the encrypted directory if it doesn't exist
-    fs::create_dir_all(context.encrypted_dir)?;
-
     // Load the DirInfo
-    let input_dir_info = context.load_dir_info(&key_set).unwrap_or_else(|_| DirInfo::new());
+    let input_dir_info = actions.load_dir_info(&context, key_set)?;
 
     // Process directory entries
     let mut output_dir_info = DirInfo::new();
@@ -305,14 +461,7 @@ pub fn encrypt_directory(
                         reporter.reuse(&source_file);
                     } else {
                         // Encrypt the file
-                        if let Some(parent) = encrypted_file.parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-                        encrypt_file(
-                            &mut File::open(&source_file)?,
-                            &mut File::create(&encrypted_file)?,
-                            &key_set.recipients,
-                        )?;
+                        actions.encrypt_file(&source_file, &encrypted_file, &key_set.recipients)?;
                     }
                 }
                 output_dir_info
@@ -327,7 +476,11 @@ pub fn encrypt_directory(
     // Update the DirInfo with the new items
     if output_dir_info != input_dir_info || !context.dir_info_path.is_file() {
         // Save the updated DirInfo
-        output_dir_info.to_file(&context.dir_info_path, &key_set.recipients)?;
+        actions.save_dir_info(
+            &output_dir_info,
+            &context.dir_info_path,
+            &key_set.recipients,
+        )?;
     }
 
     // Delete items in encrypted directory but not in source directory
@@ -344,12 +497,12 @@ pub fn encrypt_directory(
             let path = entry.path();
             if path.is_dir() {
                 if fs::read_dir(&path)?.next().is_none() {
-                    fs::remove_dir(&path)?;
+                    actions.remove_dir(&path)?;
                 }
             } else {
                 if !whitelist.contains(&path) {
-                    fs::remove_file(&path)?;
-                    reporter.deleted(&path);
+                    reporter.only_in_output(&path);
+                    actions.remove_file(&path)?;
                 }
             }
             Ok(())
@@ -365,6 +518,7 @@ pub fn encrypt_directory(
 /// * `source_dir` - Path to the source directory
 /// * `encrypted_dir` - Path to the encrypted directory
 /// * `key_set` - Set of keys for decryption
+/// * `reporter` - Reporter to update with decryption status
 ///
 /// # Returns
 /// Result indicating success or failure
@@ -375,9 +529,6 @@ pub fn decrypt_directory(
     reporter: &mut Reporter,
 ) -> Result<()> {
     let context = Context::new(source_dir.as_ref(), encrypted_dir.as_ref());
-
-    // create the source directory if it doesn't exist
-    fs::create_dir_all(context.source_dir)?;
 
     // Load the DirInfo
     let input_dir_info = context.load_dir_info(&key_set)?;
@@ -432,8 +583,8 @@ pub fn decrypt_directory(
         } else {
             let file_key = context.get_file_key(&path)?;
             if !input_dir_info.items.contains_key(file_key.as_ref()) {
+                reporter.only_in_output(&path);
                 fs::remove_file(&path)?;
-                reporter.deleted(&path);
             }
         }
         Ok(())

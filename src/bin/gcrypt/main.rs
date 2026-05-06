@@ -22,10 +22,25 @@ enum Command {
         #[clap(short, long, required = true)]
         output: std::path::PathBuf,
     },
+    /// List all files in a encrypted directory
     List {
         /// Path to the config file
         #[clap(short, long, required = true)]
         config: std::path::PathBuf,
+
+        /// Path to the encrypted directory
+        #[clap(short, long, required = true)]
+        encrypted: std::path::PathBuf,
+    },
+    /// Check status of a source directory against a encrypted directory
+    Status {
+        /// Path to the config file
+        #[clap(short, long, required = true)]
+        config: std::path::PathBuf,
+
+        /// Path to the source directory
+        #[clap(short, long, required = true)]
+        source: std::path::PathBuf,
 
         /// Path to the encrypted directory
         #[clap(short, long, required = true)]
@@ -127,6 +142,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     file_key
                 );
             }
+        }
+
+        Command::Status {
+            config,
+            source,
+            encrypted,
+        } => {
+            println!("Using config file: {}", config.to_string_lossy());
+            println!("Source directory: {}", source.to_string_lossy());
+            println!("Encrypted directory: {}", encrypted.to_string_lossy());
+
+            let config = config::Config::from_file(config)?;
+            let key_set = cryptor::KeySet::from_config(&config)?;
+            let mut reporter = cryptor::Reporter::new();
+            cryptor::check_status(source, encrypted, &key_set, &mut reporter)?;
+            reporter.report();
         }
 
         Command::Encrypt {

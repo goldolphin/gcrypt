@@ -19,6 +19,6 @@ define_error! (
         FromUtf8(std::string::FromUtf8Error),
         #[from]
         StripPrefix(std::path::StripPrefixError),
-        Generic(&'static str)
+        Static(&'static str)
     }
 );

@@ -12,8 +12,8 @@ pub fn read_identity_from_file(path: impl AsRef<Path>) -> Result<x25519::Identit
         .map(|line| line.trim())
         .filter(|line| !line.starts_with('#') && !line.is_empty())
         .next()
-        .ok_or_else(|| Error::Generic("No identity found in file"))?;
-    let identity = x25519::Identity::from_str(str).map_err(Error::Generic)?;
+        .ok_or_else(|| Error::Static("No identity found in file"))?;
+    let identity = x25519::Identity::from_str(str).map_err(Error::Static)?;
     Ok(identity)
 }
 
@@ -45,7 +45,7 @@ pub fn encrypt_file(
             .map(|r| Box::new(r.clone()) as Box<_>)
             .collect(),
     )
-    .ok_or(Error::Generic("Failed to create encryptor"))?;
+    .ok_or(Error::Static("Failed to create encryptor"))?;
 
     // Encrypt the data
     let mut encrypt_writer = encryptor.wrap_output(writer)?;
